@@ -1,0 +1,6 @@
+pygame-ce>=2.5.0
+pygame_gui>=0.6.0
+networkx>=3.0
+numpy>=1.20
+shapely>=2.0
+openpyxl>=3.0

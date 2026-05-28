@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+logs/
+collision_log.txt
+*.log
+.venv/

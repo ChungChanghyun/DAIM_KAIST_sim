@@ -1511,50 +1511,24 @@ class GraphDESv6:
             # slipped past acquire — fail fast so the regression is
             # caught immediately rather than producing a stale-collision
             # trace much later.
-            #
-            # 예외: V 가 diverge zone 의 exit_node 끝에 STOPPED 라
-            # _on_stopped 의 diverge-release fix 가 lock 을 풀었고 (holder
-            # =None), V 가 *그 seg 위에 그대로 남아있어* cross 못 한 상태.
-            # 이건 *의도된* lock-occupancy 불일치 (cycle deadlock 해소용)
-            # 이지 진짜 위반이 아님. 물리 안전은 leader chain 이 보장.
-            if holder is not v and not self._is_intended_diverge_release(
-                    v, lock_id):
+            if holder is not v:
                 detail = (f"V#{v.id} entered {seg_key} "
                           f"lock={lock_id} holder={'V#'+str(holder.id) if holder else 'None'} "
                           f"waiters={[w.id for w in self._zone_waiters.get(lock_id,[])]}")
                 self._log_zcu_violation(t, lock_id, 'NO_LOCK', detail)
                 # log-only — physical collision 은 gap_violation 으로 잡음.
 
-            # Type 2: multiple vehicles inside the same zone.
-            # 의도된 diverge-release 상태인 V (= exit 끝 STOPPED) 는 zone 의
-            # *끝점* 에 물리적으로 위치 → 다른 occupant 와 분리. 카운트에서
-            # 제외해 false SIMULTANEOUS 억제.
+            # Type 2: multiple vehicles inside the same zone
             inside = []
             for s in zone.all_segs():
                 for other in self._seg_occupants.get(s, []):
                     if other not in inside:
                         inside.append(other)
-            real_inside = [x for x in inside
-                           if not self._is_intended_diverge_release(x, lock_id)]
-            if len(real_inside) > 1:
+            if len(inside) > 1:
                 detail = (f"zone={lock_id} "
                           f"vehicles={sorted(x.id for x in inside)} "
                           f"holder={'V#'+str(holder.id) if holder else 'None'}")
                 self._log_zcu_violation(t, lock_id, 'SIMULTANEOUS', detail)
-
-    def _is_intended_diverge_release(self, v: Vehicle, lock_id: str) -> bool:
-        """V 가 diverge zone(lock_id) 의 exit_node 끝에 STOPPED 인가.
-        _on_stopped 의 diverge-release fix 가 이 조건에서 lock 을 푼다.
-        이 상태의 lock-occupancy 불일치는 의도된 것 (cycle 해소용)이므로
-        NO_LOCK / SIMULTANEOUS 검사에서 제외한다."""
-        if not lock_id.endswith('_diverge'):
-            return False
-        if v.state != STOP:
-            return False
-        if v.seg_to not in self._lock_exit_nodes.get(lock_id, set()):
-            return False
-        seg_len = v.current_seg_length()
-        return seg_len > 0 and v.seg_offset >= seg_len - SEG_CROSS_EPS
 
     def _log_zcu_violation(self, t: float, lock_id: str,
                            vtype: str, detail: str):
@@ -3786,13 +3760,6 @@ class GraphDESv6:
                           for lid in zone_lids)
             if blocked:
                 continue
-            # NEW: alt seg 의 *물리적 점유자* 검사 — V_Y 가 있으면 충돌
-            # 위험 (= reroute 후 V_X 가 V_Y 와 같은 seg). gap_violation
-            # 의 직접 원인.
-            others = [o for o in self._seg_occupants.get(alt_seg, [])
-                       if o is not v]
-            if others:
-                continue
             # alt 에서 dest 까지 path 계산.
             # cur_next 방향을 차단하여 reroute 경로가 *cur_next 다시 통과*
             # 안 하도록. 그렇지 않으면 BFS 가 cycle 형태 path 반환 가능.
@@ -3800,10 +3767,47 @@ class GraphDESv6:
                                                 blocked={cur_next})
             if new_tail is None:
                 continue
+            # 새 path 전방 안전거리(h_min) 검사: reroute 는 정상 plan(CVP)
+            # 의 h_min 보장을 우회하므로, V 를 *전방 OHT 의 h_min 안에*
+            # 삽입하면 즉시 gap violation. alt 첫 seg 만이 아니라 새 path
+            # 의 h_min+margin 거리 내 전방 OHT 가 있으면 그 alt 거부.
+            if not self._reroute_path_clear(v, fork_node, new_tail):
+                continue
             # 성공 — reroute apply
             self._apply_reroute(t, v, fork_node, alt, new_tail)
             return
         # 모든 alt 실패 — 그냥 둠
+
+    def _reroute_path_clear(self, v: Vehicle, fork_node: str,
+                            new_tail: list) -> bool:
+        """reroute 후 V 가 (fork → new_tail) 를 따라갈 때, 전방
+        h_min+margin 거리 안에 다른 OHT 가 있으면 False (= 그 alt 거부).
+        정상 plan(CVP)이 leader.committed_traj 기준으로 h_min 을 보장하는
+        것처럼, reroute 도 새 path 의 전방 차와 h_min 이 확보되는 alt 만
+        선택하도록 한다."""
+        MARGIN = 1000.0
+        horizon = v.h_min + MARGIN
+        # V → fork 까지 거리 (V 는 fork=seg_to 직전에 정지/접근 중)
+        cur_len = v.current_seg_length()
+        cum = max(0.0, cur_len - v.seg_offset)
+        prev = fork_node
+        for nxt in new_tail:           # new_tail[0] = alt
+            if cum > horizon:
+                break
+            seg = (prev, nxt)
+            seg_obj = self.gmap.segments.get(seg)
+            if seg_obj is None:
+                break
+            for o in self._seg_occupants.get(seg, []):
+                if o is v:
+                    continue
+                # o 의 V 기준 전방 거리 = (V→fork) + (fork→o)
+                o_dist = cum + o.seg_offset
+                if o_dist < v.h_min:
+                    return False       # h_min 이내 전방 OHT → reroute 거부
+            cum += seg_obj.length
+            prev = nxt
+        return True
 
     def _shortest_path_bfs(self, from_node: str, to_node: str, blocked=None):
         """간단 BFS — graph 거리 최단. 도달 불가 시 None.

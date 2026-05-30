@@ -609,6 +609,58 @@ pkl 내용 (PklMapGraph 소비): node 위치 = stop_region centroid, edge =
 `M,*` 키 (max_speed = dist/m_cost), affect_state = 충돌 state 목록 (TAPG 가
 precedence 강제), ports = od_pairs 목적지. Rotate cost 는 최단회전/90 으로 정규화.
 
+### 7.4 harness 실행 & 시나리오
+
+두 entry point 는 **인터페이스가 다르다.**
+
+| | `vis_mcs_unified.py` | `test_plan_micro.py` |
+|--|--|--|
+| 인터페이스 | argparse 플래그 | **고정 시나리오 이름** |
+| 대수/시드 | CLI 자유 지정 (`--agv/--oht/--s3d/--seed`) | `@viz_scenario` 함수에 하드코딩 |
+| 맵 | KaistTB 공장 (`Maps/`, `--json`/`--pkl`) | synthetic `oht.large.map(.split).json` |
+| 성격 | 통합 MCS 시뮬레이터 (시스템 entry) | OHT 엔진 micro 단위테스트/뷰어 |
+
+**vis_mcs_unified** — README 참조. 예: `python vis_mcs_unified.py --agv 7 --oht 6 --s3d 2`.
+`SPLIT_ZONES` 는 **읽지 않는다** (KaistTB 맵 사용).
+
+**test_plan_micro** — 3가지 실행 모드:
+
+```bash
+python test_plan_micro.py                    # 모든 headless 테스트(SCENARIOS) 실행, 창 없음
+python test_plan_micro.py <name> ...          # 지정한 headless 테스트만
+python test_plan_micro.py --viz <name>        # pygame 뷰어로 시나리오 1개 (이름 필수)
+python test_plan_micro.py --viz <name> --trace 12,40   # 특정 차량 ID trace
+```
+
+> `--viz` 뒤 이름은 **필수**. 없거나 미등록 이름이면 usage + 전체 목록 출력 후 종료.
+> N/seed/dispatch 는 자유 플래그가 아니라 시나리오 함수에 박혀 있다
+> (예: `idle_n200_seed99_disp` = 200대 + seed 99 + dispatch λ=0.8/s).
+
+**`--viz` 시나리오 그룹** (`@viz_scenario` 등록 키):
+
+| 그룹 | 예시 이름 | 내용 |
+|--|--|--|
+| S — 단일/추종/convoy 물리 | `S1_solo_straight`, `S6_two_follow_straight`, `S9_convoy_long`, `S12_real_map_curves_convoy`, `S12_deadlock_seed{278,589,683,817,1147,1168,2016}` | 소수 차량 trajectory/leader 검증 |
+| multi — 랜덤 고밀도 | `multi_n50_seed{1,42}`, `multi_n100_seed{99,42,1,2,7,11,50,278,1147}`, `multi_n200_seed{1,42,99}` | `random_safe_path` 다차량 |
+| idle — pre-IDLE spawn | `idle_n200_seed99`, `idle_n200_seed99_disp` | 200대 STOP/IDLE 시작 (disp = dispatch 부착) |
+| Z — diverge/merge zone | `Z1_diverge_solo` ~ `Z5_diamond_same_branch`, `Z3_real_merge_solo`, `Z4_real_merge_convoy`, `Z5_real_diverge_convoy` | ZCU lock 경합 |
+
+**`SPLIT_ZONES` 환경변수** (test_plan_micro 의 `idle_*` 시나리오만 읽음):
+
+| 값 | 사용 맵 | 효과 |
+|--|--|--|
+| (미설정) | `oht.large.map.json` | 기본 |
+| `=1` | `oht.large.map.split.json` | 긴 diverge zone 을 중점에서 분할 → mutex 구간 단축, 긴 직선은 non-zone corridor 화 |
+
+```powershell
+$env:SPLIT_ZONES="1"; python test_plan_micro.py --viz idle_n200_seed99_disp
+```
+
+> 맵은 `test_plan_micro.py` 와 **같은 디렉토리**에서 로드된다
+> (`os.path.dirname(__file__)`). 따라서 `oht.large.map.json` /
+> `oht.large.map.split.json` 두 파일이 스크립트 옆에 있어야 `idle_*` 가 동작.
+> `*_disp` 시나리오는 `dispatch.py` 도 필요 (test_graph_v6 가 조건부 import).
+
 ---
 
 ## 8. 모션 / 충돌회피 모델 비교 (Automod vs OHT vs AGV)
